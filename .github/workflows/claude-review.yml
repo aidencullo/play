@@ -1,0 +1,62 @@
+name: Claude PR Review
+
+on:
+  pull_request:
+    types: [opened, synchronize]
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Get PR diff
+        id: diff
+        run: |
+          git diff origin/${{ github.base_ref }}...HEAD > pr.diff
+          echo "diff_size=$(wc -c < pr.diff)" >> $GITHUB_OUTPUT
+
+      - name: Review with Claude
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: |
+          DIFF=$(cat pr.diff)
+
+          RESPONSE=$(curl -s https://api.anthropic.com/v1/messages \
+            -H "x-api-key: $ANTHROPIC_API_KEY" \
+            -H "anthropic-version: 2023-06-01" \
+            -H "content-type: application/json" \
+            -d "$(jq -n \
+              --arg diff "$DIFF" \
+              --arg title "$PR_TITLE" \
+              --arg body "$PR_BODY" \
+              '{
+                model: "claude-sonnet-4-6",
+                max_tokens: 1024,
+                messages: [{
+                  role: "user",
+                  content: "Review this pull request.\n\nTitle: \($title)\nDescription: \($body)\n\nDiff:\n\($diff)\n\nProvide a concise code review covering: correctness, potential bugs, security issues, and style. Be direct and brief."
+                }]
+              }')")
+
+          REVIEW=$(echo "$RESPONSE" | jq -r '.content[0].text')
+
+          gh pr comment "$PR_NUMBER" \
+            --repo "$REPO" \
+            --body "## Claude Code Review
+
+$REVIEW
+
+---
+*Reviewed by [Claude](https://claude.ai) (claude-sonnet-4-6)*"
